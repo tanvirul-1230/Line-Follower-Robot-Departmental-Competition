@@ -40,9 +40,8 @@ Software: C++ (Arduino IDE)
 
 📸 Demo & Schematics
 
-Video have been attached as files.
+[Video have been attached as files.](https://youtu.be/_y0VWtV_XBU)
 
-Photo have been attached. 
 
 🔧 How It Works
 
