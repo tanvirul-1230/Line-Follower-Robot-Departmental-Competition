@@ -1,0 +1,74 @@
+Components
+
+Arduino Uno
+
+L293D Motor Driver IC (the 16-pin chip)
+
+8-Sensor Array (using pins A0-A5, 11, and 12)
+
+3S LiPo Battery (for power)
+
+2 Micrometal gear motor
+
+1 360 wheel.
+
+Chasis board. 
+
+Diagram Wiring Notes
+Here is a breakdown of the connections shown in the diagram, which match your Code 2.txt file.
+
+1. Power (3S Battery):
+
+Battery (+): Connects to the Arduino VIN pin (to power the Arduino) AND to the Vcc2 (Pin 8) of the L293D (to power the motors).
+
+Battery (-): Connects to an Arduino GND pin. This is the common ground for the entire circuit.
+
+2. L293D Motor Driver IC:
+
+Logic Power: Vcc1 (Pin 16) connects to the Arduino's 5V pin.
+
+Ground: Pins 4, 5, 12, and 13 are all connected to the common GND.
+
+Left Motor (Motor 1):
+
+Enable 1,2 (Pin 1) -> Arduino Pin 9 (leftMotorSpeed)
+
+Input 1 (Pin 2) -> Arduino Pin 2 (leftMotor1)
+
+Input 2 (Pin 7) -> Arduino Pin 3 (leftMotor2)
+
+Output 1 (Pin 3) & Output 2 (Pin 6) -> Connect to the two terminals of the Left Motor.
+
+Right Motor (Motor 2):
+
+Enable 3,4 (Pin 9) -> Arduino Pin 10 (rightMotorSpeed)
+
+Input 3 (Pin 10) -> Arduino Pin 4 (rightMotor1)
+
+Input 4 (Pin 15) -> Arduino Pin 5 (rightMotor2)
+
+Output 3 (Pin 11) & Output 4 (Pin 14) -> Connect to the two terminals of the Right Motor.
+
+3. 8-Sensor Array:
+
+VCC: Connects to Arduino 5V.
+
+GND: Connects to common GND.
+
+Sensor Pins (1-8):
+
+Sensor 1 -> Arduino A0
+
+Sensor 2 -> Arduino A1
+
+Sensor 3 -> Arduino A2
+
+Sensor 4 -> Arduino A3
+
+Sensor 5 -> Arduino A4
+
+Sensor 6 -> Arduino A5
+
+Sensor 7 -> Arduino 11
+
+Sensor 8 -> Arduino 12

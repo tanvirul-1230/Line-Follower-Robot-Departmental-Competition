@@ -1,0 +1,822 @@
+// ========================================================
+// Advanced Competition-Grade Line Follower Robot
+// Optimized for high speed, stability, and precision
+// ========================================================
+
+// === Configuration ===
+const int sensorPins[8] = {A0, A1, A2, A3, A4, A5, 11, 12};
+const int numSensors = 8;
+
+// === Motor Configuration ===
+const int leftMotor1 = 2;
+const int leftMotor2 = 3;
+const int rightMotor1 = 4;
+const int rightMotor2 = 5;
+const int leftMotorSpeed = 9;   // PWM pin for left motor speed
+const int rightMotorSpeed = 10;  // PWM pin for right motor speed
+
+// === Performance Parameters ===
+const int BASE_SPEED = 170;        // Normal straight line speed (0-255)
+const int MAX_SPEED = 255;         // Maximum motor speed (0-255)
+const int TURN_SPEED = 140;        // Speed during sharp turns
+const int BRAKE_SPEED = 50;        // Speed reduction for braking
+
+// === Dynamic PID Constants ===
+// These will be adjusted automatically based on robot state and track conditions
+float Kp = 35.0; // Proportional gain
+float Ki = 0.0;  // Integral gain
+float Kd = 55.0; // Derivative gain
+
+// High speed PID (for straight sections)
+float Kp_HS = 27.0;
+float Ki_HS = 0.08;
+float Kd_HS = 80.0;
+
+// Precision PID (for curves and junctions)
+float Kp_PS = 40.0;
+float Ki_PS = 0.0;
+float Kd_PS = 60.0;
+
+// === Robot State Variables ===
+enum RobotState {
+  CALIBRATING,
+  FOLLOWING_LINE,
+  APPROACHING_CURVE,
+  IN_CURVE,
+  APPROACHING_JUNCTION,
+  IN_JUNCTION,
+  LOST,
+  RECOVERY
+};
+
+// === Junction Types ===
+enum JunctionType {
+  NO_JUNCTION,
+  T_JUNCTION,
+  X_JUNCTION,
+  Y_JUNCTION,
+  ZIGZAG
+};
+
+// === Global Variables ===
+RobotState currentState = CALIBRATING;
+JunctionType currentJunction = NO_JUNCTION;
+
+unsigned long stateStartTime = 0;
+unsigned long lastLinePosition = 0;
+unsigned long lastUpdateTime = 0;
+unsigned long loopStartTime = 0;
+unsigned long controlInterval = 0; // Timing control
+
+// PID control variables
+float lastError = 0;
+float integral = 0;
+bool onLine = false;
+
+// Line position tracking
+int position = 3500; // Center position (7 sensors, each 1000 units apart)
+int lastPosition = 3500;
+int positionHistory[10] = {3500, 3500, 3500, 3500, 3500, 3500, 3500, 3500, 3500, 3500};
+int historyIndex = 0;
+
+// Velocity and acceleration tracking
+int velocity = 0;
+int acceleration = 0;
+float curvature = 0;
+
+// Calibration data
+int sensorMin[8] = {1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023};
+int sensorMax[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+int sensorThreshold[8] = {512, 512, 512, 512, 512, 512, 512, 512}; // Default threshold before calibration
+
+// Motion profiles
+int targetSpeed = BASE_SPEED;
+float dynamicKp = Kp;
+float dynamicKi = Ki;
+float dynamicKd = Kd;
+
+// Recovery variables
+int recoveryStep = 0;
+unsigned long recoveryStartTime = 0;
+const unsigned long MAX_RECOVERY_TIME = 1500; // Maximum time for recovery attempt (ms)
+
+// Path analysis variables
+bool isCurveDetected = false;
+bool isApproachingJunction = false;
+int patternRecognitionBuffer[20]; // For pattern recognition
+int bufferIndex = 0;
+
+// Function prototypes
+void setup();
+void loop();
+void calibrateSensors();
+int readPosition();
+void updateRobotState();
+void updatePIDConstants();
+void calculateMotion();
+void adjustMotorSpeeds(int leftSpeed, int rightSpeed);
+void setMotors(int leftSpeed, int rightSpeed);
+void detectJunctions();
+void handleJunction();
+void performRecovery();
+void analyzePath();
+bool isSCurve();
+int calculateCurvature();
+void updatePositionHistory();
+void saveRuntimeStatistics();
+
+void setup() {
+  // Initialize motor pins
+  pinMode(leftMotor1, OUTPUT);
+  pinMode(leftMotor2, OUTPUT);
+  pinMode(rightMotor1, OUTPUT);
+  pinMode(rightMotor2, OUTPUT);
+  pinMode(leftMotorSpeed, OUTPUT);
+  pinMode(rightMotorSpeed, OUTPUT);
+  
+  // Initialize sensor pins
+  for (int i = 0; i < numSensors; i++) {
+    pinMode(sensorPins[i], INPUT);
+  }
+  
+  // Optional button for starting/calibration
+  delay(500); // Short delay before starting
+
+  // Start calibration automatically
+  calibrateSensors();
+  
+  // Initialize timing
+  lastUpdateTime = millis();
+  stateStartTime = millis();
+}
+
+void loop() {
+  loopStartTime = micros(); // Track loop start time for performance monitoring
+  
+  // Read sensors and determine position
+  position = readPosition();
+  
+  // Check if any sensor detects the line
+  if (onLine) {
+    // Update robot state based on sensor data
+    updateRobotState();
+    
+    // Analyze path for upcoming features
+    analyzePath();
+    
+    // Detect junctions and special cases
+    detectJunctions();
+    
+    // Update PID constants based on current state
+    updatePIDConstants();
+    
+    // Calculate motion and motor speeds
+    calculateMotion();
+    
+    // Update position history
+    updatePositionHistory();
+  } else {
+    // No line detected - enter recovery mode
+    if (currentState != RECOVERY) {
+      currentState = RECOVERY;
+      recoveryStep = 0;
+      recoveryStartTime = millis();
+    }
+    performRecovery();
+  }
+  
+  // Timing control - ensure consistent loop timing for better control
+  controlInterval = micros() - loopStartTime;
+  
+  // Store runtime statistics for future optimization
+  saveRuntimeStatistics();
+}
+
+// === Sensor Functions ===
+
+void calibrateSensors() {
+  unsigned long calibrationStartTime = millis();
+  currentState = CALIBRATING;
+  
+  // Wiggle the robot during calibration to capture min/max values
+  int calibrationCycle = 0;
+  
+  while (millis() - calibrationStartTime < 2500) { // 2.5 seconds calibration
+    // Oscillate motors to move robot side to side
+    int motorSpeed = 100 + (sin((float)(millis() - calibrationStartTime) / 150.0) * 100);
+    setMotors(motorSpeed, -motorSpeed);
+    
+    // Read all sensors and update min/max values
+    for (int i = 0; i < numSensors; i++) {
+      int sensorValue = analogRead(sensorPins[i]);
+      
+      if (sensorValue < sensorMin[i]) {
+        sensorMin[i] = sensorValue;
+      }
+      if (sensorValue > sensorMax[i]) {
+        sensorMax[i] = sensorValue;
+      }
+    }
+    
+    calibrationCycle++;
+    delay(5); // Short delay between readings
+  }
+  
+  // Stop motors after calibration
+  setMotors(0, 0);
+  
+  // Calculate thresholds
+  for (int i = 0; i < numSensors; i++) {
+    // Add safety margin to thresholds
+    sensorMin[i] = max(0, sensorMin[i] - 10);
+    sensorMax[i] = min(1023, sensorMax[i] + 10);
+    
+    // Set threshold at 40% between min and max (adjusted for better black line detection)
+    sensorThreshold[i] = sensorMin[i] + (sensorMax[i] - sensorMin[i]) * 0.4;
+  }
+  
+  // Ready to start line following
+  currentState = FOLLOWING_LINE;
+  lastUpdateTime = millis();
+  stateStartTime = millis();
+}
+
+int readPosition() {
+  int sensorValues[numSensors];
+  bool sensorOnLine[numSensors];
+  int activeSensors = 0;
+  unsigned long weightedSum = 0;
+  unsigned long sum = 0;
+  
+  // Read sensor values and normalize them
+  for (int i = 0; i < numSensors; i++) {
+    int rawValue;
+    if (i < 6) {
+      // Analog sensors (A0-A5)
+      rawValue = analogRead(sensorPins[i]);
+      // Check if sensor reading indicates black line (using calibrated threshold)
+      sensorOnLine[i] = (rawValue > sensorThreshold[i]);
+    } else {
+      // Digital sensors (pins 11-12)
+      rawValue = digitalRead(sensorPins[i]);
+      // For digital sensors, 1 indicates black line as specified
+      sensorOnLine[i] = (rawValue == 1);
+    }
+    
+    if (sensorOnLine[i]) {
+      activeSensors++;
+      weightedSum += (i * 1000); // Each sensor position is 1000 units apart
+      sum += 1;
+    }
+  }
+  
+  // Check if any sensor is on the line
+  onLine = (activeSensors > 0);
+  
+  if (onLine) {
+    // Calculate weighted average for line position
+    int calculatedPosition = (int)(weightedSum / sum);
+    lastLinePosition = millis();
+    
+    // Calculate velocity (rate of position change)
+    velocity = calculatedPosition - lastPosition;
+    lastPosition = calculatedPosition;
+    
+    return calculatedPosition;
+  } else {
+    // Return last known position if no line is detected
+    return lastPosition;
+  }
+}
+
+// === State Management Functions ===
+
+void updateRobotState() {
+  unsigned long currentTime = millis();
+  unsigned long timeInState = currentTime - stateStartTime;
+  
+  // Calculate curvature based on position history
+  curvature = calculateCurvature();
+  
+  // State transition logic
+  switch (currentState) {
+    case FOLLOWING_LINE:
+      // Check for curves
+      if (abs(curvature) > 0.5) {
+        currentState = APPROACHING_CURVE;
+        stateStartTime = currentTime;
+      }
+      // Check for junctions
+      else if (isApproachingJunction) {
+        currentState = APPROACHING_JUNCTION;
+        stateStartTime = currentTime;
+      }
+      break;
+      
+    case APPROACHING_CURVE:
+      // Transition to IN_CURVE when curvature increases further
+      if (abs(curvature) > 0.8) {
+        currentState = IN_CURVE;
+        stateStartTime = currentTime;
+      }
+      // Go back to FOLLOWING_LINE if curvature decreases
+      else if (abs(curvature) < 0.3 && timeInState > 100) {
+        currentState = FOLLOWING_LINE;
+        stateStartTime = currentTime;
+      }
+      break;
+      
+    case IN_CURVE:
+      // Return to normal line following when curve ends
+      if (abs(curvature) < 0.3 && timeInState > 200) {
+        currentState = FOLLOWING_LINE;
+        stateStartTime = currentTime;
+      }
+      break;
+      
+    case APPROACHING_JUNCTION:
+      // Handle junction detection
+      if (currentJunction != NO_JUNCTION) {
+        currentState = IN_JUNCTION;
+        stateStartTime = currentTime;
+      }
+      // Return to normal if junction detection was false alarm
+      else if (timeInState > 300 && !isApproachingJunction) {
+        currentState = FOLLOWING_LINE;
+        stateStartTime = currentTime;
+      }
+      break;
+      
+    case IN_JUNCTION:
+      // Return to normal line following after handling junction
+      if (timeInState > 500 || currentJunction == NO_JUNCTION) {
+        currentState = FOLLOWING_LINE;
+        stateStartTime = currentTime;
+        currentJunction = NO_JUNCTION;
+      }
+      break;
+      
+    case LOST:
+      // Start recovery if lost too long
+      if (timeInState > 200) {
+        currentState = RECOVERY;
+        recoveryStep = 0;
+        recoveryStartTime = currentTime;
+      }
+      break;
+      
+    case RECOVERY:
+      // Return to line following if line is found during recovery
+      if (onLine && timeInState > 100) {
+        currentState = FOLLOWING_LINE;
+        stateStartTime = currentTime;
+      }
+      // Reset recovery if taking too long
+      else if (timeInState > MAX_RECOVERY_TIME) {
+        recoveryStep = 0;
+        recoveryStartTime = currentTime;
+      }
+      break;
+      
+    case CALIBRATING:
+      // Should not reach here during normal operation
+      break;
+  }
+}
+
+// === Motion Control Functions ===
+
+void updatePIDConstants() {
+  // Dynamically adjust PID constants based on robot state
+  switch (currentState) {
+    case FOLLOWING_LINE:
+      // For straight line, use high-speed PID settings
+      dynamicKp = Kp_HS;
+      dynamicKi = Ki_HS;
+      dynamicKd = Kd_HS;
+      targetSpeed = BASE_SPEED;
+      break;
+      
+    case APPROACHING_CURVE:
+      // Blend between high-speed and precision PID
+      float blendFactor = min(1.0, abs(curvature));
+      dynamicKp = Kp_HS * (1 - blendFactor) + Kp_PS * blendFactor;
+      dynamicKi = Ki_HS * (1 - blendFactor) + Ki_PS * blendFactor;
+      dynamicKd = Kd_HS * (1 - blendFactor) + Kd_PS * blendFactor;
+      
+      // Reduce speed when approaching curve
+      targetSpeed = BASE_SPEED - (int)(blendFactor * (BASE_SPEED - TURN_SPEED));
+      break;
+      
+    case IN_CURVE:
+      // Use precision PID for curves
+      dynamicKp = Kp_PS;
+      dynamicKi = Ki_PS;
+      dynamicKd = Kd_PS;
+      
+      // Adjust turn speed based on curve sharpness
+      float curveFactor = min(1.0, abs(curvature) / 2.0);
+      targetSpeed = TURN_SPEED - (int)(curveFactor * 30);
+      break;
+      
+    case APPROACHING_JUNCTION:
+    case IN_JUNCTION:
+      // Use precision PID for junctions
+      dynamicKp = Kp_PS * 1.2; // Increase for better precision
+      dynamicKi = 0;           // No integral for quick response
+      dynamicKd = Kd_PS * 1.3; // Higher derivative gain for quick correction
+      
+      // Reduce speed for junction navigation
+      targetSpeed = TURN_SPEED;
+      break;
+      
+    case LOST:
+    case RECOVERY:
+      // Keep PID values but reduce speed
+      dynamicKp = Kp_PS;
+      dynamicKi = 0;
+      dynamicKd = Kd_PS / 2;
+      targetSpeed = TURN_SPEED / 2;
+      break;
+      
+    case CALIBRATING:
+      // Don't use PID during calibration
+      dynamicKp = 0;
+      dynamicKi = 0;
+      dynamicKd = 0;
+      targetSpeed = 0;
+      break;
+  }
+  
+  // Further dynamic adjustments based on real-time analysis
+  if (isSCurve()) {
+    // For S-curves, increase derivative gain for better handling
+    dynamicKd *= 1.5;
+    targetSpeed = (int)(targetSpeed * 0.85); // Slow down for S-curves
+  }
+}
+
+void calculateMotion() {
+  // Calculate line position error (center is 3500 for 8 sensors)
+  int setpoint = 3500;
+  int error = position - setpoint;
+  
+  // Calculate PID terms
+  float proportional = error;
+  integral = integral + error;
+  
+  // Limit integral to prevent windup
+  int maxIntegral = 10000 / dynamicKi; // Dynamic limit based on Ki value
+  if (dynamicKi != 0) {
+    integral = constrain(integral, -maxIntegral, maxIntegral);
+  } else {
+    integral = 0; // Reset integral if Ki is zero
+  }
+  
+  float derivative = error - lastError;
+  lastError = error;
+  
+  // Calculate PID output
+  float pidOutput = (dynamicKp * proportional + dynamicKi * integral + dynamicKd * derivative);
+  
+  // Calculate motor speeds with advanced motion planning
+  int leftSpeed, rightSpeed;
+  
+  // Base speeds adjusted by PID output
+  if (pidOutput >= 0) {
+    // Turning right
+    leftSpeed = targetSpeed;
+    rightSpeed = targetSpeed - (int)pidOutput;
+  } else {
+    // Turning left
+    leftSpeed = targetSpeed + (int)pidOutput;
+    rightSpeed = targetSpeed;
+  }
+  
+  // Handle special cases based on robot state
+  if (currentState == IN_JUNCTION) {
+    handleJunction();
+    return; // Junction handler manages motors directly
+  }
+  
+  // Apply speed limits and motor control
+  adjustMotorSpeeds(leftSpeed, rightSpeed);
+}
+
+void adjustMotorSpeeds(int leftSpeed, int rightSpeed) {
+  // Apply acceleration limits for smoother control
+  static int currentLeftSpeed = 0;
+  static int currentRightSpeed = 0;
+  const int maxAcceleration = 20; // Maximum speed change per loop
+  
+  // Gradually adjust speed with acceleration limiting
+  int leftDiff = leftSpeed - currentLeftSpeed;
+  int rightDiff = rightSpeed - currentRightSpeed;
+  
+  // Limit acceleration
+  if (abs(leftDiff) > maxAcceleration) {
+    leftDiff = (leftDiff > 0) ? maxAcceleration : -maxAcceleration;
+  }
+  if (abs(rightDiff) > maxAcceleration) {
+    rightDiff = (rightDiff > 0) ? maxAcceleration : -maxAcceleration;
+  }
+  
+  // Update current speeds
+  currentLeftSpeed += leftDiff;
+  currentRightSpeed += rightDiff;
+  
+  // Ensure minimum speeds for reliable motor operation
+  if (currentLeftSpeed > 0 && currentLeftSpeed < 40) currentLeftSpeed = 40;
+  if (currentRightSpeed > 0 && currentRightSpeed < 40) currentRightSpeed = 40;
+  
+  // Constrain speeds to valid range
+  currentLeftSpeed = constrain(currentLeftSpeed, -MAX_SPEED, MAX_SPEED);
+  currentRightSpeed = constrain(currentRightSpeed, -MAX_SPEED, MAX_SPEED);
+  
+  // Send commands to motors
+  setMotors(currentLeftSpeed, currentRightSpeed);
+}
+
+void setMotors(int leftSpeed, int rightSpeed) {
+  // Handle left motor direction and speed
+  if (leftSpeed >= 0) {
+    digitalWrite(leftMotor1, HIGH);
+    digitalWrite(leftMotor2, LOW);
+    analogWrite(leftMotorSpeed, leftSpeed);
+  } else {
+    digitalWrite(leftMotor1, LOW);
+    digitalWrite(leftMotor2, HIGH);
+    analogWrite(leftMotorSpeed, -leftSpeed);
+  }
+  
+  // Handle right motor direction and speed
+  if (rightSpeed >= 0) {
+    digitalWrite(rightMotor1, HIGH);
+    digitalWrite(rightMotor2, LOW);
+    analogWrite(rightMotorSpeed, rightSpeed);
+  } else {
+    digitalWrite(rightMotor1, LOW);
+    digitalWrite(rightMotor2, HIGH);
+    analogWrite(rightMotorSpeed, -rightSpeed);
+  }
+}
+
+// === Path Analysis and Junction Detection ===
+
+void analyzePath() {
+  // Add current position to pattern recognition buffer
+  patternRecognitionBuffer[bufferIndex] = position;
+  bufferIndex = (bufferIndex + 1) % 20; // Circular buffer
+  
+  // Check for upcoming features using predictive analysis
+  int positionDelta = abs(position - positionHistory[(historyIndex + 9) % 10]); // Position change over last 10 readings
+  
+  // Detect trends in position
+  int trend = 0;
+  for (int i = 0; i < 9; i++) {
+    if (positionHistory[(historyIndex + i) % 10] < positionHistory[(historyIndex + i + 1) % 10]) {
+      trend++; // Moving right
+    } else if (positionHistory[(historyIndex + i) % 10] > positionHistory[(historyIndex + i + 1) % 10]) {
+      trend--; // Moving left
+    }
+  }
+  
+  // Reset junction approaching flag
+  isApproachingJunction = false;
+  
+  // Scan sensor pattern for wide line or multiple lines (junction indicators)
+  int activeSensorCount = 0;
+  int gapDetected = 0;
+  bool activeSensorPattern[numSensors] = {false};
+  
+  // Read current sensor values
+  for (int i = 0; i < numSensors; i++) {
+    if (i < 6) {
+      // Analog sensors
+      int value = analogRead(sensorPins[i]);
+      activeSensorPattern[i] = (value > sensorThreshold[i]);
+    } else {
+      // Digital sensors
+      activeSensorPattern[i] = (digitalRead(sensorPins[i]) == 1);
+    }
+    
+    if (activeSensorPattern[i]) {
+      activeSensorCount++;
+    }
+  }
+  
+  // Check for gaps between active sensors (potential junction indicator)
+  for (int i = 0; i < numSensors - 2; i++) {
+    if (activeSensorPattern[i] && !activeSensorPattern[i+1] && activeSensorPattern[i+2]) {
+      gapDetected++;
+    }
+  }
+  
+  // Detect wide line or multiple line patterns that suggest junctions
+  if ((activeSensorCount > 3) || (gapDetected > 0)) {
+    isApproachingJunction = true;
+  }
+  
+  // S-curve detection is done separately in isSCurve()
+}
+
+bool isSCurve() {
+  // Analyze position history to detect S-curves
+  // Look for direction changes in position trend
+  int directionChanges = 0;
+  int lastDirection = 0;
+  
+  for (int i = 1; i < 10; i++) {
+    int idx1 = (historyIndex + i - 1) % 10;
+    int idx2 = (historyIndex + i) % 10;
+    
+    int currentDirection = positionHistory[idx2] - positionHistory[idx1];
+    
+    if (lastDirection * currentDirection < 0 && abs(currentDirection) > 100) {
+      // Direction changed
+      directionChanges++;
+    }
+    
+    if (currentDirection != 0) {
+      lastDirection = currentDirection;
+    }
+  }
+  
+  return (directionChanges >= 2);
+}
+
+int calculateCurvature() {
+  // Calculate curvature as the rate of change of position over time
+  // Higher values indicate sharper curves
+  float positionSum = 0;
+  float centerDeviation = 0;
+  
+  // Calculate average position and deviation from center
+  for (int i = 0; i < 10; i++) {
+    positionSum += positionHistory[i];
+    centerDeviation += abs(positionHistory[i] - 3500);
+  }
+  
+  float avgPosition = positionSum / 10;
+  float avgDeviation = centerDeviation / 10;
+  
+  // Calculate slope between first and last position
+  int idx1 = (historyIndex + 1) % 10;
+  int idx2 = historyIndex;
+  float slope = (positionHistory[idx2] - positionHistory[idx1]) / 9.0;
+  
+  // Combine deviation and slope for curvature
+  return (abs(slope) + avgDeviation / 1000.0) / 10.0;
+}
+
+void updatePositionHistory() {
+  // Store current position in history array
+  positionHistory[historyIndex] = position;
+  historyIndex = (historyIndex + 1) % 10;
+}
+
+void detectJunctions() {
+  // Reset junction type
+  currentJunction = NO_JUNCTION;
+  
+  // Count active sensors
+  int activeSensors = 0;
+  bool sensorState[numSensors];
+  
+  for (int i = 0; i < numSensors; i++) {
+    if (i < 6) {
+      // Analog sensors
+      int value = analogRead(sensorPins[i]);
+      sensorState[i] = (value > sensorThreshold[i]);
+    } else {
+      // Digital sensors
+      sensorState[i] = (digitalRead(sensorPins[i]) == 1);
+    }
+    
+    if (sensorState[i]) {
+      activeSensors++;
+    }
+  }
+  
+  // Check for specific junction patterns
+  if (activeSensors >= 5) {
+    // Potential X junction or T junction
+    bool leftEdge = (sensorState[0] || sensorState[1]);
+    bool rightEdge = (sensorState[numSensors-1] || sensorState[numSensors-2]);
+    bool middle = (sensorState[numSensors/2-1] || sensorState[numSensors/2]);
+    
+    if (leftEdge && rightEdge && middle) {
+      currentJunction = X_JUNCTION;
+    } else if ((leftEdge || rightEdge) && middle) {
+      currentJunction = T_JUNCTION;
+    } else if ((leftEdge && sensorState[2] && sensorState[3]) || 
+               (rightEdge && sensorState[numSensors-3] && sensorState[numSensors-4])) {
+      currentJunction = Y_JUNCTION;
+    }
+  } else if (activeSensors >= 3) {
+    // Check for zigzag pattern
+    if ((sensorState[0] && sensorState[2] && !sensorState[1]) || 
+        (sensorState[numSensors-1] && sensorState[numSensors-3] && !sensorState[numSensors-2])) {
+      currentJunction = ZIGZAG;
+    }
+  }
+}
+
+void handleJunction() {
+  // Junction handling logic based on junction type
+  switch (currentJunction) {
+    case T_JUNCTION:
+      // Default T-junction behavior: turn right
+      // Can be customized based on competition requirements
+      setMotors(targetSpeed, targetSpeed/4);
+      break;
+      
+    case X_JUNCTION:
+      // Default X-junction behavior: go straight
+      setMotors(targetSpeed, targetSpeed);
+      break;
+      
+    case Y_JUNCTION:
+      // Default Y-junction behavior: take right branch
+      setMotors(targetSpeed, targetSpeed/3);
+      break;
+      
+    case ZIGZAG:
+      // Zigzag requires careful navigation
+      // Slow down and use increased PID response
+      int leftSpeed = targetSpeed - (int)(position - 3500) / 10;
+      int rightSpeed = targetSpeed + (int)(position - 3500) / 10;
+      
+      setMotors(leftSpeed, rightSpeed);
+      break;
+      
+    case NO_JUNCTION:
+      // Should not reach here
+      break;
+  }
+}
+
+void performRecovery() {
+  unsigned long recoveryTime = millis() - recoveryStartTime;
+  
+  // Progressive recovery strategy
+  switch (recoveryStep) {
+    case 0:
+      // First step: slight reverse with turn
+      if (recoveryTime < 300) {
+        setMotors(-TURN_SPEED, -TURN_SPEED/2);
+      } else {
+        recoveryStep = 1;
+      }
+      break;
+      
+    case 1:
+      // Second step: rotate to find line
+      if (recoveryTime < 600) {
+        setMotors(TURN_SPEED, -TURN_SPEED);
+      } else {
+        recoveryStep = 2;
+      }
+      break;
+      
+    case 2:
+      // Third step: rotate opposite direction
+      if (recoveryTime < 1100) {
+        setMotors(-TURN_SPEED, TURN_SPEED);
+      } else {
+        recoveryStep = 3;
+      }
+      break;
+      
+    case 3:
+      // Fourth step: wider search pattern
+      if (recoveryTime < 1500) {
+        int rotateSpeed = (int)(TURN_SPEED * 1.5);
+        setMotors(rotateSpeed, -rotateSpeed);
+      } else {
+        // Reset recovery sequence if line not found
+        recoveryStep = 0;
+        recoveryStartTime = millis();
+      }
+      break;
+  }
+}
+
+void saveRuntimeStatistics() {
+  // Store performance statistics for optimization
+  // (not using Serial output as requested)
+  static unsigned long totalLoopTime = 0;
+  static unsigned long loopCount = 0;
+  static int maxLoopTime = 0;
+  
+  unsigned long loopTime = micros() - loopStartTime;
+  totalLoopTime += loopTime;
+  loopCount++;
+  
+  if (loopTime > maxLoopTime) {
+    maxLoopTime = loopTime;
+  }
+  
+  // These values could be used by runtime optimization algorithms
+  // but are not printed to serial as requested
+}
